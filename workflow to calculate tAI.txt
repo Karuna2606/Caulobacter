@@ -1,0 +1,169 @@
+workflow to calculate tAI
+STEP-1--TO Divide the whole genes in codons and prepare the list of codons 
+
+# Step 1: Load Biostrings (if not installed)
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+if (!require("Biostrings")) {
+  BiocManager::install("Biostrings")
+}
+library(Biostrings)
+
+# Step 2: Read CDS FASTA file
+cds <- readDNAStringSet("C:\\Users\\kanua\\Desktop\\Project iit\\sequence.txt")
+
+# Step 3: Clean gene names (retain full header first)
+gene_headers <- names(cds)
+
+# Step 4: Function to split DNA sequence into codons
+get_codons <- function(seq) {
+  seq_str <- as.character(seq)
+  codons <- substring(seq_str, seq(1, nchar(seq_str)-2, 3), seq(3, nchar(seq_str), 3))
+  return(codons)
+}
+
+# Step 5: Apply codon splitting to each gene
+codon_list <- lapply(cds, get_codons)
+
+# Step 6: Build data frame with raw Gene_IDs
+codon_df <- data.frame(
+  Gene_ID = rep(gene_headers, sapply(codon_list, length)),
+  Codon = unlist(codon_list),
+  stringsAsFactors = FALSE
+)
+
+# Step 7: Extract only CCNA_xxxxxx from Gene_ID
+codon_df$Gene_ID <- sub(".*locus_tag=([A-Za-z0-9_]+)].*", "\\1", codon_df$Gene_ID)
+
+# Step 8: Save cleaned file
+write.csv(codon_df, "gene_codon_list_clean.csv", row.names = FALSE)
+cat("✅ Step 1 complete: Codons + Clean Gene_IDs saved to gene_codon_list_clean.csv\n")
+
+--------------------------------------------------------------------------------------------------------------------
+STEP-2--TO DO wobble pairing and finding the weights of codons and normalizing them 
+# Load necessary libraries
+library(dplyr)
+library(stringr)
+
+# Step 1: Load codon list
+codons_df <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\gene_codon_list_clean.csv", stringsAsFactors = FALSE)
+
+# Step 2: Load TPM table
+trna_df <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\trna_con_stage6.csv", stringsAsFactors = FALSE)
+
+# Step 3: Wobble match scoring function
+get_s <- function(codon_base3, anticodon_base1) {
+  if (codon_base3 == "A" && anticodon_base1 == "T") return(1.0)
+  if (codon_base3 == "T" && anticodon_base1 == "A") return(1.0)
+  if (codon_base3 == "T" && anticodon_base1 == "G") return(0.5)
+  if (codon_base3 == "C" && anticodon_base1 == "G") return(1.0)
+  if (codon_base3 == "G" && anticodon_base1 == "C") return(1.0)
+  if (codon_base3 == "G" && anticodon_base1 == "T") return(0.5)
+  return(0.0)
+}
+
+
+# Step 4: Unique codons from data
+unique_codons <- unique(codons_df$Codon)
+
+# Step 5: Calculate W_j for each codon
+calculate_codon_weight <- function(codon) {
+  codon_base3 <- substr(codon, 3, 3)
+  
+  # For all anticodons in TPM table
+  weights <- mapply(function(anticodon, tpm) {
+    s <- get_s(codon_base3, substr(anticodon, 1, 1))
+    return(tpm * s)
+  }, trna_df$AntiCodon, trna_df$TPM)
+  
+  sum(weights)
+}
+
+# Step 6: Create codon weight data frame
+codon_weights <- data.frame(
+  Codon = unique_codons,
+  Codon_Weight = sapply(unique_codons, calculate_codon_weight)
+)
+
+# Step 7: Normalize codon weights
+max_weight <- max(codon_weights$Codon_Weight)
+codon_weights$w_j <- codon_weights$Codon_Weight / max_weight
+
+# Step 8: Merge weights back to codon list
+codons_df <- left_join(codons_df, codon_weights, by = "Codon")
+
+# Step 9: Save to CSV
+write.csv(codons_df, "codon_weights_with_tpm6.csv", row.names = FALSE)
+cat("✅ Step 2 complete: Codon weights saved to codon_weights_with_tpm.csv\n")
+
+------------------------------------------------------------------------------------------------------------------
+STEP-3---calculation of tAi- that is the geometric mean of the normalized weights of codons
+# Load necessary library
+
+library(dplyr)
+
+# Step 1: Load codon weights file
+codon_df <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\codon_weights_with_tpm6.csv", stringsAsFactors = FALSE)
+
+# Step 2: Group by Gene_ID and calculate geometric mean of w_j
+calculate_tai <- function(weights) {
+  if (any(weights <= 0)) return(0)  # avoid log(0) %>% 
+  return(exp(mean(log(weights))))
+}
+
+
+
+gene_tai_df <- codon_df %>%
+  group_by(Gene_ID) %>%
+  summarise(
+    Codon_Count = n(),
+    tAI = round(calculate_tai(w_j), 5)
+  ) %>%
+  arrange(desc(tAI))
+
+# Step 3: Save to CSV
+write.csv(gene_tai_df, "gene_tai_results6.csv", row.names = FALSE)
+
+
+cat("✅ Step 3 complete: Gene-wise tAI saved to gene_tai_results.csv\n")
+
+-------------------------------------------------------------------------------------------------------------------------------
+STEP 4-merging the all the 6 data files together 
+# Load necessary library
+install.packages("purrr")
+library(purrr)
+
+library(dplyr)
+
+# Step 1: Load all stage-wise tAI files
+stage1 <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\gene_tai_results1.csv")        # Stage 1
+stage2 <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\gene_tai_results2.csv")        # Stage 2
+stage3 <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\gene_tai_results3.csv")        # Stage 3
+stage4 <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\gene_tai_results4.csv")        # Stage 4
+stage5 <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\gene_tai_results5.csv")        # Stage 5
+stage6 <- read.csv("C:\\Users\\kanua\\Desktop\\Project iit\\gene_tai_results6.csv")        # Stage 6
+
+# Step 2: Select only Gene_ID and tAI, rename tAI for each stage
+stage1 <- stage1 %>% select(Gene_ID, Stage1_tAI = tAI)
+stage2 <- stage2 %>% select(Gene_ID, Stage2_tAI = tAI)
+stage3 <- stage3 %>% select(Gene_ID, Stage3_tAI = tAI)
+stage4 <- stage4 %>% select(Gene_ID, Stage4_tAI = tAI)
+stage5 <- stage5 %>% select(Gene_ID, Stage5_tAI = tAI)
+stage6 <- stage6 %>% select(Gene_ID, Stage6_tAI = tAI)
+
+# Step 3: Merge all by Gene_ID
+merged <- reduce(list(stage1, stage2, stage3, stage4, stage5, stage6), full_join, by = "Gene_ID")
+
+# Step 4: Save final merged file
+write.csv(merged, "gene_tai_all_stages.csv", row.names = FALSE)
+cat("✅ Merged tAI file saved as gene_tai_all_stages.csv\n")
+
+-----------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
